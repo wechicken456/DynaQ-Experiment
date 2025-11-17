@@ -1,0 +1,38 @@
+# Command-line arguments can override these values.
+
+total_timesteps: 5000000
+seed: 42
+
+# Logging settings
+logger: wandb # Options: tensorboard, wandb, both, console, none
+log_dir: ./logs
+wandb_project_name: dynaq
+wandb_entity: null
+record_period: 1000
+
+torch_deterministic: true
+cuda: true
+track: false
+
+# Standard RL hyperparameters
+learning_rate: 0.00025
+buffer_size: 100000
+gamma: 0.99
+tau: 1.0
+target_network_frequency: 1000
+batch_size: 64
+start_e: 1.0
+end_e: 0.05
+exploration_fraction: 0.5
+learning_starts: 10000
+train_frequency: 5
+
+# DynaQ-specific hyperparameters
+imagined_buffer_size: 100000
+model_learning_rate: 0.001
+model_update_frequency: 200
+dream_switch_off_step: 100000
+dream_rollout_length: 2
+dream_frequency: 10
+dream_batch_size: 64
+q_batch_ratio: 0.5
