@@ -4,23 +4,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def scale_reward_down(r):
+    return (r - (-100.0)) / (100.0 - (-100.0))  # adjust according to environment reward range
+
+def scale_reward_up(r):
+    return r * (100.0 - (-100.0)) + (-100.0) # inverse of scale_reward_down
 
 class MLPQNetwork(ABC, nn.Module):
-    def __init__(self, obs_dim, action_dim, hidden_dims=[128, 128], use_layer_norm=True):
+    def __init__(self, obs_dim, action_dim, hidden_dims=[64, 64]):
         """
         Args:
             obs_dim (int): Dimension of observation space
             action_dim (int): Number of discrete actions
             hidden_dims (list[int]): List of hidden layer dimensions
-            use_layer_norm (bool): Whether to use layer normalization
         """
         super().__init__()
         layers = []
         prev_dim = obs_dim
+
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
-            if use_layer_norm:
-                layers.append(nn.LayerNorm(hidden_dim))
             layers.append(nn.ReLU())
             prev_dim = hidden_dim
         layers.append(nn.Linear(prev_dim, action_dim))
@@ -49,9 +52,8 @@ class MLPWorldModel(nn.Module):
     It takes (state, action) and predicts (next_state, reward, done).
     Suitable for low-dimensional continuous state spaces.
     """
-    def __init__(self, obs_dim, action_dim, hidden_dims=[128, 128], 
-                 state_loss_weight=1.0, reward_loss_weight=1.0, done_loss_weight=1.0,
-                 use_layer_norm=True):
+    def __init__(self, obs_dim, action_dim, hidden_dims=[64, 64], 
+                 state_loss_weight=1.0, reward_loss_weight=1.0, done_loss_weight=1.0):
         """
         Args:
             obs_dim (int): Dimension of observation space
@@ -72,11 +74,10 @@ class MLPWorldModel(nn.Module):
         # Shared body for (state, action) features
         layers = []
         prev_dim = obs_dim + action_dim
+
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
-            if use_layer_norm:
-                layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(nn.ReLU())
+            layers.append(nn.GELU())
             prev_dim = hidden_dim
         self.shared_body = nn.Sequential(*layers)
 
@@ -92,7 +93,8 @@ class MLPWorldModel(nn.Module):
 
     def forward(self, s, a_one_hot) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward pass to predict environment dynamics.
+        returns the delta between next imagined state and current state.
+        Should call
         
         Args:
             s: Current state tensor
@@ -121,6 +123,33 @@ class MLPWorldModel(nn.Module):
         pred_done_logit = self.head_done(features)      # (batch_size, 1)
         
         return pred_next_state, pred_reward, pred_done_logit
+    
+    @torch.no_grad()
+    def predict(self, s, a_one_hot) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        A single "dream" step. Predicts the next state, reward, and done.
+        This is used for generative "imagination rollouts".
+        
+        Args:
+            s: Current state tensor
+               Shape: (batch_size, obs_dim)
+            a_one_hot: One-hot encoded action tensor
+                       Shape: (batch_size, action_dim)
+        
+        Returns:
+            tuple of (pred_s, pred_r, pred_d):
+                pred_s: Predicted next state
+                       Shape: (batch_size, obs_dim)
+                pred_r: Predicted reward
+                       Shape: (batch_size, 1)
+                pred_d: Predicted done flag (0 or 1)
+                       Shape: (batch_size, 1)
+        """
+        # should still be same shapes
+        delta_state, reward, done_logit = self.forward(s, a_one_hot)
+        next_state = s + delta_state # Residual connection
+        done_prob = torch.sigmoid(done_logit)
+        return next_state, reward, done_prob
 
     def get_model_loss(self, s, a_one_hot, next_s, r, d):
         """
@@ -146,13 +175,16 @@ class MLPWorldModel(nn.Module):
                 loss_done: BCE loss for done prediction (scalar)
         """
         # shapes: (batch_size, obs_dim), (batch_size, 1), (batch_size, 1)
-        pred_s, pred_r, pred_d_logits = self.forward(s, a_one_hot)
+        pred_delta, pred_r, pred_d_logits = self.forward(s, a_one_hot)
+        target_delta = next_s - s  # Residual target
+        loss_state = F.smooth_l1_loss(pred_delta, target_delta)
 
-        loss_state = F.mse_loss(pred_s, next_s)
-        
         # Squeeze just to be sure
-        loss_reward = F.mse_loss(pred_r.squeeze(), r.squeeze())
+        loss_reward = F.smooth_l1_loss(pred_r.squeeze(), r.squeeze())
         
+        if d.type() != torch.float32:
+            d = d.float()
+            
         loss_done = F.binary_cross_entropy_with_logits(pred_d_logits.squeeze(), d.squeeze())
 
         total_loss = (self.state_loss_weight * loss_state + 
@@ -160,31 +192,7 @@ class MLPWorldModel(nn.Module):
                      self.done_loss_weight * loss_done)
         return total_loss, loss_state, loss_reward, loss_done
 
-    @torch.no_grad()
-    def dream_step(self, s, a_one_hot) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        A single "dream" step. Predicts the next state, reward, and done.
-        This is used for generative "imagination rollouts".
-        
-        Args:
-            s: Current state tensor
-               Shape: (batch_size, obs_dim)
-            a_one_hot: One-hot encoded action tensor
-                       Shape: (batch_size, action_dim)
-        
-        Returns:
-            tuple of (pred_s, pred_r, pred_d):
-                pred_s: Predicted next state
-                       Shape: (batch_size, obs_dim)
-                pred_r: Predicted reward
-                       Shape: (batch_size, 1)
-                pred_d: Predicted done flag (0 or 1)
-                       Shape: (batch_size, 1)
-        """
-        # should still be same shapes
-        pred_s, pred_r, pred_d_logits = self.forward(s, a_one_hot)
-        pred_d = (pred_d_logits > 0).float() 
-        return pred_s, pred_r, pred_d
+
 
 
 #class CNNQNetwork(nn.Module):

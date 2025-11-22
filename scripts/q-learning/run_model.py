@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import argparse
 from utils import make_env
-from dynaq import DynaQAgent
+from models import MLPQNetwork
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -16,10 +16,11 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    env = make_env(args.env_id, args.seed, render_mode="human", record_period=1)
+    env = make_env(args.env_id, args.seed, "eval", render_mode="human", record_period=1)
     
-    agent = DynaQAgent.load(args.checkpoint, env, device)
-    agent.q_network.eval()
+    q_network = MLPQNetwork(env.observation_space.shape[0], env.action_space.n).to(device)
+    q_network.load_state_dict(torch.load(args.checkpoint, weights_only=True, map_location=device))
+    q_network.network.eval()
     
     print(f"Running agent from {args.checkpoint}")
     print("Press Ctrl+C to stop")
@@ -34,7 +35,7 @@ if __name__ == "__main__":
                 # Select action greedily (no exploration)
                 with torch.no_grad():
                     obs_tensor = torch.Tensor(obs).to(device).unsqueeze(0)
-                    q_values = agent.q_network(obs_tensor)
+                    q_values = q_network(obs_tensor)
                     action = torch.argmax(q_values, dim=1).cpu().numpy()[0]
                 
                 obs, reward, terminated, truncated, _ = env.step(action)

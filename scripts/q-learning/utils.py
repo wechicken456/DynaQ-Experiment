@@ -4,7 +4,7 @@
 import gymnasium as gym
 
 
-def make_env(env_id, seed, train=True, render_mode="rgb_array", record_period=100):
+def make_env(env_id, seed, run_name, train=True, render_mode="rgb_array", record_period=100) -> gym.Env:
     """
     Creates and wraps the LunarLander environment.
     """
@@ -16,7 +16,7 @@ def make_env(env_id, seed, train=True, render_mode="rgb_array", record_period=10
     if render_mode == "rgb_array":
         env = gym.wrappers.RecordVideo(
             env, 
-            video_folder="./videos",
+            video_folder=f"./videos-{run_name}",
             name_prefix="training" if train else "eval",
             episode_trigger=lambda x: x % record_period == 0
         )
